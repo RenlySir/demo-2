@@ -42,13 +42,6 @@ public class RptZh08Service {
      * @return 0 表示成功，非 0 表示错误码
      */
     public int executeProc(String iDateStr) {
-        // 开启事务
-        DefaultTransactionDefinition def = new DefaultTransactionDefinition();
-        def.setName("TXN_PROC_A_RPT_ZH08");
-        // 设置隔离级别，通常与数据库默认一致，必要时可设为 READ_COMMITTED
-        def.setIsolationLevel(TransactionDefinition.ISOLATION_READ_COMMITTED);
-
-        TransactionStatus status = transactionManager.getTransaction(def);
         int oFlg = 0;
 
         try {
@@ -65,6 +58,7 @@ public class RptZh08Service {
             cleanOldData(vMonth);
 
             // 3. 计算临时表数据 (Tmp)
+            ensureIndexes();
             calcTempTableTmp(vMonth, vLastDay);
 
             // 4. 计算临时表数据 (Tmp_dw)
@@ -82,17 +76,11 @@ public class RptZh08Service {
             // 8. 插入最终报表数据 (A_RPT_ZH08) - 分步骤插入各个指标
             insertReportData(vMonth, vMonth1, vLastDay, vDate);
 
-            // 提交事务
-            transactionManager.commit(status);
             logger.info("报表 PROC_A_RPT_ZH08 执行成功, 月份: {}", vMonth);
             return 0;
 
         } catch (Exception e) {
             logger.error("报表 PROC_A_RPT_ZH08 执行失败", e);
-            // 回滚事务
-            if (status != null) {
-                transactionManager.rollback(status);
-            }
             // 返回错误码 (模拟 SQLCODE)
             oFlg = -1;
             // 这里可以记录详细的错误日志到数据库日志表
@@ -220,55 +208,62 @@ public class RptZh08Service {
      * 汇总计算到 tmpa
      */
     private void calcSummaryTmpa(String vMonth, String vLastDay) {
+        String startDay = vMonth + "01";
         String sql = """
             INSERT INTO a_Rpt_Zh08_tmpa (DATA_M, P_CODE, PAYRATE, SJJE, SJZGS, SJDWS)
             SELECT ? data_m,
-                   CASE WHEN a.corppayrate <= 25 THEN (SELECT cd_id FROM pub_code_value WHERE cd_type = '1041' AND cd_name = CONCAT(a.corppayrate, '%')) ELSE '127' END p_code,
+                   COALESCE(pc.cd_id, '127') p_code,
                    a.corppayrate,
                    SUM(a.amt) sjje,
                    COUNT(DISTINCT CASE WHEN a.row_id = 1 AND ((a.tradecode = 'GJ0107' AND a.tradesubcode = '2') OR (a.tradecode = 'GJ0108' AND a.tradesubcode = '2') OR (a.tradecode = 'GJ0111')) THEN a.persacctno ELSE NULL END) sjzgs,
                    COUNT(DISTINCT CASE WHEN ((a.tradecode = 'GJ0107' AND a.tradesubcode = '2') OR (a.tradecode = 'GJ0108' AND a.tradesubcode = '2') OR (a.tradecode = 'GJ0111')) THEN a.corpacctno ELSE NULL END) sjdws
             FROM a_rpt_zh08_tmp a
-            WHERE a.Acctdate BETWEEN STR_TO_DATE(CONCAT(?, '01'), '%Y%m%d') AND LAST_DAY(STR_TO_DATE(CONCAT(?, '01'), '%Y%m%d'))
+            LEFT JOIN pub_code_value pc ON pc.cd_type = '1041' AND pc.cd_name = CONCAT(a.corppayrate, '%')
+            WHERE a.Acctdate BETWEEN STR_TO_DATE(?, '%Y%m%d') AND STR_TO_DATE(?, '%Y%m%d')
             GROUP BY a.corppayrate
             UNION ALL
             SELECT ? data_m,
-                   CASE WHEN a2.dwjcbl <= 25 THEN (SELECT cd_id FROM pub_code_value WHERE cd_type = '1041' AND cd_name = CONCAT(a2.dwjcbl, '%')) ELSE '127' END p_code,
+                   COALESCE(pc.cd_id, '127') p_code,
                    a2.dwjcbl,
                    SUM(a1.fse) SJJE, 0 SJZGS, 0 SJDWS
-            FROM F_EV_DTLPERS a1, f_AR_BUSICORP_s a2, f_ip_cifcorp_s a3
-            WHERE a1.dwzh = a2.dwzh AND a2.custid = a3.custid AND a1.validflag = '1'
+            FROM F_EV_DTLPERS a1
+            JOIN f_AR_BUSICORP_s a2 ON a1.dwzh = a2.dwzh
+            JOIN f_ip_cifcorp_s a3 ON a2.custid = a3.custid
+            LEFT JOIN pub_code_value pc ON pc.cd_type = '1041' AND pc.cd_name = CONCAT(a2.dwjcbl, '%')
+            WHERE a1.validflag = '1'
               AND a2.data_dt = ? AND a3.data_dt = ?
-              AND a1.jzrq BETWEEN STR_TO_DATE(CONCAT(?, '01'), '%Y%m%d') AND LAST_DAY(STR_TO_DATE(CONCAT(?, '01'), '%Y%m%d'))
+              AND a1.jzrq BETWEEN STR_TO_DATE(?, '%Y%m%d') AND STR_TO_DATE(?, '%Y%m%d')
               AND (a1.tradecode = 'GJ0115' AND a1.tradesubcode = '2')
               AND grzh IN (
                   SELECT DISTINCT grzh FROM F_EV_DTLPERS a1
                   WHERE a1.validflag = '1'
                     AND ((a1.tradecode = 'GJ0107' AND a1.tradesubcode = '2') OR (a1.tradecode = 'GJ0108' AND a1.tradesubcode = '2') OR (a1.tradecode = 'GJ0111'))
-                    AND a1.jzrq BETWEEN STR_TO_DATE(CONCAT(?, '01'), '%Y%m%d') AND LAST_DAY(STR_TO_DATE(CONCAT(?, '01'), '%Y%m%d'))
+                    AND a1.jzrq BETWEEN STR_TO_DATE(?, '%Y%m%d') AND STR_TO_DATE(?, '%Y%m%d')
               )
             GROUP BY a2.dwjcbl
             """;
-        jdbcTemplate.update(sql, vMonth, vMonth, vMonth, vMonth, vLastDay, vLastDay, vMonth, vMonth, vMonth, vMonth);
+        jdbcTemplate.update(sql, vMonth, startDay, vLastDay, vMonth, vLastDay, vLastDay, startDay, vLastDay, startDay, vLastDay);
     }
 
     /**
      * 汇总计算到 dw
      */
     private void calcSummaryDw(String vMonth, String vLastDay) {
+        String startDay = vMonth + "01";
         String sql = """
             INSERT INTO a_Rpt_Zh08_dw (DATA_M, P_CODE, PAYRATE, SJJE, SJZGS, SJDWS)
             SELECT ? data_m,
-                   CASE WHEN a.corppayrate <= 25 THEN (SELECT cd_id FROM pub_code_value WHERE cd_type = '1041' AND cd_name = CONCAT(a.corppayrate, '%')) ELSE '127' END p_code,
+                   COALESCE(pc.cd_id, '127') p_code,
                    a.corppayrate,
                    SUM(a.amt) sjje,
                    COUNT(DISTINCT CASE WHEN a.row_id = 1 AND ((a.tradecode = 'GJ0107' AND a.tradesubcode = '2') OR (a.tradecode = 'GJ0108' AND a.tradesubcode = '2') OR (a.tradecode = 'GJ0111')) THEN a.persacctno ELSE NULL END) sjzgs,
                    COUNT(DISTINCT CASE WHEN ((a.tradecode = 'GJ0107' AND a.tradesubcode = '2') OR (a.tradecode = 'GJ0108' AND a.tradesubcode = '2') OR (a.tradecode = 'GJ0111')) THEN a.corpacctno ELSE NULL END) sjdws
             FROM a_rpt_zh08_tmp_dw a
-            WHERE a.Acctdate BETWEEN STR_TO_DATE(CONCAT(?, '01'), '%Y%m%d') AND LAST_DAY(STR_TO_DATE(CONCAT(?, '01'), '%Y%m%d'))
+            LEFT JOIN pub_code_value pc ON pc.cd_type = '1041' AND pc.cd_name = CONCAT(a.corppayrate, '%')
+            WHERE a.Acctdate BETWEEN STR_TO_DATE(?, '%Y%m%d') AND STR_TO_DATE(?, '%Y%m%d')
             GROUP BY a.corppayrate
             """;
-        jdbcTemplate.update(sql, vMonth, vMonth, vMonth);
+        jdbcTemplate.update(sql, vMonth, startDay, vLastDay);
     }
 
     /**
@@ -282,6 +277,50 @@ public class RptZh08Service {
             WHERE a.data_m = ? AND a.Sjzgs <> 0
             """;
         jdbcTemplate.update(sql, vMonth);
+    }
+
+    private void ensureIndexes() {
+        String existsSql = "SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = ? AND index_name = ?";
+        Integer c1 = jdbcTemplate.queryForObject(existsSql, Integer.class, "a_rpt_zh08_tmp", "idx_tmp_range");
+        if (c1 != null && c1 == 0) {
+            jdbcTemplate.execute("ALTER TABLE a_rpt_zh08_tmp ADD INDEX idx_tmp_range (Acctdate, tradecode, tradesubcode)");
+        }
+        Integer c2 = jdbcTemplate.queryForObject(existsSql, Integer.class, "a_rpt_zh08_tmp", "idx_tmp_payrate");
+        if (c2 != null && c2 == 0) {
+            jdbcTemplate.execute("ALTER TABLE a_rpt_zh08_tmp ADD INDEX idx_tmp_payrate (corppayrate)");
+        }
+        Integer c3 = jdbcTemplate.queryForObject(existsSql, Integer.class, "a_rpt_zh08_tmp", "idx_tmp_pers");
+        if (c3 != null && c3 == 0) {
+            jdbcTemplate.execute("ALTER TABLE a_rpt_zh08_tmp ADD INDEX idx_tmp_pers (persacctno)");
+        }
+        Integer c4 = jdbcTemplate.queryForObject(existsSql, Integer.class, "a_rpt_zh08_tmp", "idx_tmp_corp");
+        if (c4 != null && c4 == 0) {
+            jdbcTemplate.execute("ALTER TABLE a_rpt_zh08_tmp ADD INDEX idx_tmp_corp (corpacctno)");
+        }
+        Integer d1 = jdbcTemplate.queryForObject(existsSql, Integer.class, "a_rpt_zh08_tmp_dw", "idx_tmpdw_range");
+        if (d1 != null && d1 == 0) {
+            jdbcTemplate.execute("ALTER TABLE a_rpt_zh08_tmp_dw ADD INDEX idx_tmpdw_range (Acctdate, tradecode, tradesubcode)");
+        }
+        Integer d2 = jdbcTemplate.queryForObject(existsSql, Integer.class, "a_rpt_zh08_tmp_dw", "idx_tmpdw_payrate");
+        if (d2 != null && d2 == 0) {
+            jdbcTemplate.execute("ALTER TABLE a_rpt_zh08_tmp_dw ADD INDEX idx_tmpdw_payrate (corppayrate)");
+        }
+        Integer d3 = jdbcTemplate.queryForObject(existsSql, Integer.class, "a_rpt_zh08_tmp_dw", "idx_tmpdw_pers");
+        if (d3 != null && d3 == 0) {
+            jdbcTemplate.execute("ALTER TABLE a_rpt_zh08_tmp_dw ADD INDEX idx_tmpdw_pers (persacctno)");
+        }
+        Integer d4 = jdbcTemplate.queryForObject(existsSql, Integer.class, "a_rpt_zh08_tmp_dw", "idx_tmpdw_corp");
+        if (d4 != null && d4 == 0) {
+            jdbcTemplate.execute("ALTER TABLE a_rpt_zh08_tmp_dw ADD INDEX idx_tmpdw_corp (corpacctno)");
+        }
+        Integer e1 = jdbcTemplate.queryForObject(existsSql, Integer.class, "f_ev_dtlpers", "idx_ev_anti");
+        if (e1 != null && e1 == 0) {
+            jdbcTemplate.execute("ALTER TABLE f_ev_dtlpers ADD INDEX idx_ev_anti (grzh, jzrq, tradecode, tradesubcode, validflag)");
+        }
+        Integer p1 = jdbcTemplate.queryForObject(existsSql, Integer.class, "pub_code_value", "idx_pub_code");
+        if (p1 != null && p1 == 0) {
+            jdbcTemplate.execute("ALTER TABLE pub_code_value ADD INDEX idx_pub_code (cd_type, cd_name)");
+        }
     }
 
     /**
@@ -305,13 +344,16 @@ public class RptZh08Service {
         String sql202 = """
             INSERT INTO A_RPT_ZH08 (ORD_FLAG, DATA_M, ZBMC, ZBBM, UNIT, ZB_VALUE, YZ_VALUE)
             SELECT '1', ?, '本期末非正常缴存账户余额', '201', '万元',
-                   (SELECT CAST(ROUND(IFNULL(SUM(BAL), 0) / 10000, 2) AS CHAR)
+                   (SELECT CAST(ROUND(IFNULL(SUM(b.BAL), 0) / 10000, 2) AS CHAR)
                     FROM a_gj_pers_sd_r b
-                    WHERE NOT EXISTS (SELECT 1 FROM f_ev_dtlpers a 
-                                      WHERE a.validflag = '1' 
-                                        AND a.jzrq BETWEEN STR_TO_DATE(CONCAT(?, '01'), '%Y%m%d') AND LAST_DAY(STR_TO_DATE(?, '%Y%m')) 
-                                        AND a.tradecode = 'GJ0107' AND a.tradesubcode = '2' AND b.persacctno = a.grzh)
-                      AND data_dt = DATE_FORMAT(LAST_DAY(STR_TO_DATE(?, '%Y%m')), '%Y%m%d')),
+                    LEFT JOIN f_ev_dtlpers a
+                      ON a.validflag = '1'
+                     AND a.tradecode = 'GJ0107'
+                     AND a.tradesubcode = '2'
+                     AND a.jzrq BETWEEN STR_TO_DATE(CONCAT(?, '01'), '%Y%m%d') AND LAST_DAY(STR_TO_DATE(?, '%Y%m'))
+                     AND b.persacctno = a.grzh
+                    WHERE a.grzh IS NULL
+                      AND b.data_dt = DATE_FORMAT(LAST_DAY(STR_TO_DATE(?, '%Y%m')), '%Y%m%d')),
                    NULL
             """;
         jdbcTemplate.update(sql202, vMonth, vMonth, vMonth, vMonth);
@@ -320,19 +362,25 @@ public class RptZh08Service {
         // 建议将每个指标的 SQL 提取为独立的私有方法，如 insertMetric301(), insertMetric405() 等，以保持代码整洁
 
         // 示例：插入分类标题行
-        String sqlTitles = """
+        String sqlTitles1 = """
             INSERT INTO A_RPT_ZH08 (ORD_FLAG, DATA_M, ZBMC, ZBBM, UNIT, ZB_VALUE, YZ_VALUE)
-            SELECT '3', ?, '一、降低缴存比例', '-', '-', NULL, NULL
-            UNION ALL SELECT '8', ?, '二、缓缴', '-', '-', NULL, NULL
-            UNION ALL SELECT '13', ?, '一、继续阶段性适当降低企业缴存比例', '-', '-', NULL, NULL
-            UNION ALL SELECT '18', ?, '二、切实规范缴存基数上限', '-', '-', NULL, NULL
-            UNION ALL SELECT '25', ?, '三、扩大缴存比例浮动区间', '-', '-', NULL, NULL
-            UNION ALL SELECT '9', ?, '本年以来减少的缴存金额', '305', '万元', '0', NULL
-            UNION ALL SELECT '10', ?, ' 其中：本年以来企业减少的缴存金额', '306', '万元', '0', NULL
-            UNION ALL SELECT '11', ?, '本年以来涉及的职工人数', '307', '人', '0', NULL
-            UNION ALL SELECT '12', ?, '本年以来涉及的单位数', '308', '个', '0', NULL
+            VALUES
+            ('3', ?, '一、降低缴存比例', '-', '-', NULL, NULL),
+            ('8', ?, '二、缓缴', '-', '-', NULL, NULL),
+            ('13', ?, '一、继续阶段性适当降低企业缴存比例', '-', '-', NULL, NULL),
+            ('18', ?, '二、切实规范缴存基数上限', '-', '-', NULL, NULL),
+            ('25', ?, '三、扩大缴存比例浮动区间', '-', '-', NULL, NULL)
             """;
-        jdbcTemplate.update(sqlTitles, vMonth, vMonth, vMonth, vMonth, vMonth, vMonth, vMonth, vMonth, vMonth);
+        jdbcTemplate.update(sqlTitles1, vMonth, vMonth, vMonth, vMonth, vMonth);
+        String sqlTitles2 = """
+            INSERT INTO A_RPT_ZH08 (ORD_FLAG, DATA_M, ZBMC, ZBBM, UNIT, ZB_VALUE, YZ_VALUE)
+            VALUES
+            ('9', ?, '本年以来减少的缴存金额', '305', '万元', '0', NULL),
+            ('10', ?, ' 其中：本年以来企业减少的缴存金额', '306', '万元', '0', NULL),
+            ('11', ?, '本年以来涉及的职工人数', '307', '人', '0', NULL),
+            ('12', ?, '本年以来涉及的单位数', '308', '个', '0', NULL)
+            """;
+        jdbcTemplate.update(sqlTitles2, vMonth, vMonth, vMonth, vMonth);
 
         // 注意：原存储过程中的 Update 401 逻辑也需要在这里执行
         String sqlUpdate401 = """
