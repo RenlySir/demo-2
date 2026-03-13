@@ -1,0 +1,31 @@
+spring:
+  application:
+    name: rpt-zh08-service
+
+  # 导入外部数据库配置文件
+  config:
+    import: classpath:db-config.properties
+
+  # 主数据源配置（从外部配置文件读取）
+  datasource:
+    url: ${db.url}
+    username: ${db.username}
+    password: ${db.password}
+    driver-class-name: ${db.driver-class-name}
+    type: com.zaxxer.hikari.HikariDataSource
+    hikari:
+      maximum-pool-size: ${db.pool.max-size:10}
+      minimum-idle: ${db.pool.min-idle:2}
+      idle-timeout: 30000
+      max-lifetime: 1800000
+      connection-timeout: 30000
+      connection-test-query: SELECT 1
+      pool-name: HikariPool-RptZh08
+
+# 日志配置
+logging:
+  level:
+    com.example.service.RptZh08Service: DEBUG
+    org.springframework.jdbc: INFO
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n"
