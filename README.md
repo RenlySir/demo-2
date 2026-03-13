@@ -1,6 +1,6 @@
 # RptZh08 报表执行工具
 
-公积金报表 PROC_A_RPT_ZH08 执行工具，支持 TiDB/MySQL 数据库。
+报表 PROC_A_RPT_ZH08 执行工具，支持 TiDB/MySQL 数据库。
 
 ## 特性
 
